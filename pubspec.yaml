@@ -37,7 +37,7 @@ dependencies:
   flutter_sms_inbox: any
   sqflite: any
   path_provider: any
-  permission_handler: any
+  permission_handler: ^12.0.3
 
 dev_dependencies:
   flutter_test:
