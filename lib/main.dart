@@ -7,50 +7,63 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
-// 1. THIS FUNCTION RUNS IN THE BACKGROUND AT 11 PM
 @pragma('vm:entry-point')
 Future<void> backgroundSyncAndNotify() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   const AndroidInitializationSettings initSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
   await flutterLocalNotificationsPlugin.initialize(const InitializationSettings(android: initSettingsAndroid));
 
   SmsQuery query = SmsQuery();
-  List<SmsMessage> messages = await query.querySms(kinds: [SmsQueryKind.inbox], count: 800);
+  List<SmsMessage> messages = await query.querySms(kinds: [SmsQueryKind.inbox], count: 400);
   final RegExp amountRegex = RegExp(r"(?:rs\.?|inr)\s?(\d+(?:,\d+)?(?:\.\d+)?)", caseSensitive: false);
 
-  DateTime now = DateTime.now();
-  String todayStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
-  double todayTotal = 0;
-
   for (var msg in messages) {
-    DateTime d = msg.date ?? DateTime.now();
-    String msgDayStr = "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
-    
-    if (msgDayStr == todayStr) {
-      String body = msg.body?.toLowerCase() ?? "";
-      if (body.contains('debited') || body.contains('spent') || body.contains('paid') || body.contains('sent')) {
-        var match = amountRegex.firstMatch(body);
-        if (match != null) {
-          String amountStr = match.group(1)?.replaceAll(',', '') ?? '0';
-          double amount = double.tryParse(amountStr) ?? 0;
-          bool isInv = (body.contains('zerodha') || body.contains('groww') || body.contains('mutual fund') || body.contains('sip') || body.contains('fd'));
-          
-          if (!isInv) todayTotal += amount;
-        }
+    String body = msg.body?.toLowerCase() ?? "";
+    if (body.contains('debited') || body.contains('spent') || body.contains('paid') || body.contains('sent')) {
+      var match = amountRegex.firstMatch(body);
+      if (match != null) {
+        String amountStr = match.group(1)?.replaceAll(',', '') ?? '0';
+        double amount = double.tryParse(amountStr) ?? 0;
+        DateTime d = msg.date ?? DateTime.now();
+        String dayStr = "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
+        String monthStr = "${d.year}-${d.month.toString().padLeft(2, '0')}";
+        int isInv = (body.contains('zerodha') || body.contains('groww') || body.contains('mutual fund') || body.contains('sip') || body.contains('fd')) ? 1 : 0;
+
+        await DBHelper.insertExpense(Expense(
+          amount: amount,
+          date: dayStr,
+          month: monthStr,
+          body: msg.body ?? "",
+          isInvestment: isInv,
+        ));
       }
     }
   }
 
-  if (todayTotal > 0) {
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'daily_report', 'Daily Expense Report',
-      importance: Importance.max, priority: Priority.high,
-    );
-    await flutterLocalNotificationsPlugin.show(
-      0, 'Daily Expense Report', 'You spent ₹${todayTotal.toStringAsFixed(2)} today.', const NotificationDetails(android: androidDetails),
-    );
+  DateTime now = DateTime.now();
+  String todayStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+  List<Expense> allExpenses = await DBHelper.getExpenses();
+  double todayTotal = 0;
+
+  for (var e in allExpenses) {
+    if (e.date == todayStr && e.isInvestment == 0) {
+      todayTotal += e.amount;
+    }
   }
+
+  const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    'daily_report',
+    'Daily Expense Report',
+    importance: Importance.max,
+    priority: Priority.high,
+  );
+  await flutterLocalNotificationsPlugin.show(
+    0,
+    'Daily Expense Report Ready',
+    'Total spend today: ₹${todayTotal.toStringAsFixed(2)}',
+    const NotificationDetails(android: androidDetails),
+  );
 }
 
 void main() async {
@@ -69,30 +82,67 @@ class Expense {
   final String body;
   int isInvestment;
 
-  Expense({this.id, required this.amount, required this.date, required this.month, required this.body, this.isInvestment = 0});
+  Expense({
+    this.id,
+    required this.amount,
+    required this.date,
+    required this.month,
+    required this.body,
+    this.isInvestment = 0,
+  });
 
-  Map<String, dynamic> toMap() => {'id': id, 'amount': amount, 'date': date, 'month': month, 'body': body, 'isInvestment': isInvestment};
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'amount': amount,
+        'date': date,
+        'month': month,
+        'body': body,
+        'isInvestment': isInvestment,
+      };
 }
 
 class DBHelper {
   static Database? _db;
+
   static Future<Database> get db async {
     if (_db != null) return _db!;
-    String path = await getDatabasesPath() + '/expenses.db';
+    String path = '${await getDatabasesPath()}/expenses.db';
     _db = await openDatabase(path, version: 1, onCreate: (db, version) async {
-      await db.execute('''CREATE TABLE expenses(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, date TEXT, month TEXT, body TEXT UNIQUE, isInvestment INTEGER)''');
+      await db.execute('''
+        CREATE TABLE expenses(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          amount REAL,
+          date TEXT,
+          month TEXT,
+          body TEXT UNIQUE,
+          isInvestment INTEGER
+        )
+      ''');
     });
     return _db!;
   }
+
   static Future<void> insertExpense(Expense exp) async {
     final dbClient = await db;
     await dbClient.insert('expenses', exp.toMap(), conflictAlgorithm: ConflictAlgorithm.ignore);
   }
+
   static Future<List<Expense>> getExpenses() async {
     final dbClient = await db;
     final maps = await dbClient.query('expenses', orderBy: 'date DESC, id DESC');
-    return List.generate(maps.length, (i) => Expense(id: maps[i]['id'], amount: maps[i]['amount'], date: maps[i]['date'], month: maps[i]['month'], body: maps[i]['body'], isInvestment: maps[i]['isInvestment']));
+    return List.generate(
+      maps.length,
+      (i) => Expense(
+        id: maps[i]['id'] as int?,
+        amount: (maps[i]['amount'] as num).toDouble(),
+        date: maps[i]['date'] as String,
+        month: maps[i]['month'] as String,
+        body: maps[i]['body'] as String,
+        isInvestment: maps[i]['isInvestment'] as int,
+      ),
+    );
   }
+
   static Future<void> toggleInvestment(int id, int currentVal) async {
     final dbClient = await db;
     await dbClient.update('expenses', {'isInvestment': currentVal == 0 ? 1 : 0}, where: 'id = ?', whereArgs: [id]);
@@ -101,6 +151,7 @@ class DBHelper {
 
 class ExpenseTrackerApp extends StatelessWidget {
   const ExpenseTrackerApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -114,6 +165,7 @@ class ExpenseTrackerApp extends StatelessWidget {
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
   @override
   State<HomePage> createState() => _HomePageState();
 }
@@ -135,13 +187,12 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isLoading = false);
   }
 
-  // 2. THIS SCHEDULES THE ALARM FROM THE UI
   Future<void> _scheduleDailyReport() async {
     await Permission.notification.request();
     await Permission.scheduleExactAlarm.request();
-    
+
     DateTime now = DateTime.now();
-    DateTime scheduledDate = DateTime(now.year, now.month, now.day, 23, 0); // 11 PM
+    DateTime scheduledDate = DateTime(now.year, now.month, now.day, 23, 0);
     if (now.isAfter(scheduledDate)) scheduledDate = scheduledDate.add(const Duration(days: 1));
 
     await AndroidAlarmManager.periodic(
@@ -152,7 +203,8 @@ class _HomePageState extends State<HomePage> {
       exact: true,
       wakeup: true,
     );
-    
+
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('11 PM Daily Report Scheduled!')));
   }
 
@@ -265,10 +317,13 @@ class _HomePageState extends State<HomePage> {
           IconButton(icon: const Icon(Icons.sync), tooltip: 'Scan SMS Now', onPressed: _syncSms)
         ],
       ),
-      body: _isLoading ? const Center(child: CircularProgressIndicator()) : 
-            _currentIndex == 0 ? _buildSummary(false) :
-            _currentIndex == 1 ? _buildSummary(true) :
-            _buildTransactions(),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _currentIndex == 0
+              ? _buildSummary(false)
+              : _currentIndex == 1
+                  ? _buildSummary(true)
+                  : _buildTransactions(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (i) => setState(() => _currentIndex = i),

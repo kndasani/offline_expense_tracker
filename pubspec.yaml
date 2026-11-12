@@ -39,7 +39,7 @@ dependencies:
   path_provider: any
   permission_handler: ^12.0.3
   android_alarm_manager_plus: any
-  flutter_local_notifications: any
+  flutter_local_notifications: ^18.0.1
 
 dev_dependencies:
   flutter_test:
